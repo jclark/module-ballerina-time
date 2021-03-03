@@ -34,14 +34,3 @@ public enum DateTimeFormat {
 	ISO_ZONED_DATE_TIME,
 	RFC_1123_DATE_TIME
 }
-
-# Values returned by time:getWeekday()
-public enum DayOfWeek {
-    MONDAY,
-    TUESDAY,
-    WEDNESDAY,
-    THURSDAY,
-    FRIDAY,
-    SATURDAY,
-    SUNDAY
-}
