@@ -14,351 +14,216 @@
 // specific language governing permissions and limitations
 // under the License.
 
-import ballerina/jballerina.java;
+// Phase 1
 
-# Represents the time-zone information associated with a particular time.
-#
-# + id - Zone short ID or offset string
-# + offset - The offset in seconds
-public type TimeZone record {|
-    string id;
-    int offset = 0;
+type Error distinct error;
+type Seconds decimal;
+
+// UTC time
+
+// should handle all RFC timestamps
+// two-part structure especially to handles discontinuities,
+// which are distinctive feature of UTC
+# Point on UTC time-scale.
+# This is represented by a tuple of length 2.
+# The tuple is an ordered type and so the values can be
+# compared using the Ballerina <, <=, >, >= operators.
+# First member of tuple is int representing integral number of
+# seconds from the epoch.
+# Epoch is traditional Unix epoch of 1970-01-01T00:00:00Z
+# Second member of tuple is decimal giving the fraction of
+# a second.
+# For times before the epoch, n is negative and f is
+# non-negative. In other words, the UTC time represented
+# is on or after the second specified by n.
+# Leap seconds are handled as follows. The first member
+# of the tuple ignores leap seconds: it assumes that every day
+# has 86400 seconds. The second member of the tuple is >= 0.
+# and is < 1 except during positive leaps seconds in which it
+# is >= 1 and < 2. So given a tuple [n,f] after the epoch,
+# n / 86400 gives the day number, and (n % 86400) + f gives the
+# time in seconds since midnight UTC (for which the limit is
+# 86401 on day with a positive leap second).
+// XXX need to think about valid range for int
+// should at least be able to represent
+type Utc readonly & [int,decimal];
+
+# Returns Utc representing current time.
+# `precision` specifies number of zeros after decimal point
+# for seconds e.g. 3 would give millisecond precision
+# nil means native precision of clock
+function utcNow(int? precision = ()) returns Utc;
+
+// converts from RFC 3339 timestamp to Utc
+function utcFromString(string str) returns Utc|Error;
+function utcToString(Utc utc) returns string;
+
+// Returns Utc time that occurs seconds after `utc`.
+// This assumes that all days have 86400 seconds, except when
+// utc represents a time during a positive leap
+// second, in which case the corresponding day will be assumed
+// to have 86401 seconds.
+function utcAddSeconds(Utc utc, Seconds seconds) returns Utc;
+
+// Returns difference in seconds between utc1 and utc2.
+// This will be positive if utc1 occurs after utc2
+// This assumes that all days have 86400 seconds, except when
+// utc1 or utc2 represents a time during a positive leap
+// second, in which case the corresponding day will be assumed
+// to have 86401 seconds.
+function utcDiffSeconds(Utc utc1, Utc utc2) returns Seconds;
+
+
+
+// Monotonic time
+
+// seconds from some unspecified epoch
+function monotonicNow() returns Seconds;
+
+// Civil time
+
+# date in proleptic Gregorian calendar
+type Date record {
+  // year 1 means AD 1
+  // year 0 means 1 BC
+  // year -1 means 2 BC
+  int year;
+  # month 1 is January, as in ISO 8601
+  int month;
+  # day 1 is first day of month
+  int day;
+};
+
+function dateValidate(Date date) returns Error? {
+  // check that days and months are within range
+  // per Gregorian calendar rules
+}
+
+// Need to decide whether SUNDAY or MONDAY is first day of week
+// ISO (and logic) says Monday; US convention is Sunday
+const int SUNDAY = 0;
+// etc
+
+type DayOfWeek SUNDAY|MONDAY|...|SATURDAY;
+
+// panic if date is not valid
+function dayOfWeek(Date date) returns DayOfWeek {
+}
+
+# Time within a day
+# Not always duration from midnight,
+type TimeOfDay record {
+  // this is "hour" not "hours" because
+  // consistency with year/month/day
+  // it is not the same as hours from midnight for a local time
+  // because of daylight savings time discontinuities
+  int hour;
+  int minute;
+  // it is very common for seconds to not be specified
+  // Should this be "seconds"?
+  Seconds second?;
+};
+
+// This is closed so it is a subtype of Delta
+// Fields can negative
+// if any of the three fields are > 0, then all must be >= 0
+// if any of the three fields are < 0, then all must be <= 0
+// Semantic is that durations should be left out
+type ZoneOffset readonly & record {|
+  int hours;
+  int minutes = 0;
+  # IETF zone files have historical zones that are offset by
+  # integer seconds; we use Seconds type so that this is a subtype
+  # of Delta
+  Seconds seconds?;
 |};
 
-# Represents a particular time with its associated time-zone.
-#
-# + time - Time value as milliseconds since epoch
-# + zone - The time zone of the time
-public type Time record {|
-    int time;
-    TimeZone zone;
+const ZoneOffset Z = { hours: 0 };
+
+type ZERO_OR_ONE 0|1;
+
+# Time within some region relative to a
+# time scale stipulated by civilian authorities
+// This is relatively loose type;
+// we can have other types that are tighter.
+// Similar to struct tm in C.
+// Module is called time so this is time:Civil
+type Civil record {
+  // the date time in that region
+  *Date;
+  *TimeOfDay;
+  // offset of the date time in that region at that time
+  // from Utc
+  // positive means the local time is ahead of UTC
+  ZoneOffset utcOffset?;
+
+  # if present, abbreviation for the local time (e.g. EDT, EST)
+  # in effect at the time represented by this record;
+  # this is quite the same as the name of a time zone
+  # one time zone can have two abbreviations: one for
+  # standard time and one for daylight savings time
+  string timeAbbrev?;
+  // when the clocks are put back at the end of DST,
+  // one hour's worth of times occur twice
+  // i.e. the local time is ambiguous
+  // this says which of those two times is meant
+  // same as fold field in Python
+  // see https://www.python.org/dev/peps/pep-0495/
+  // is_dst has similar role in struct tm,
+  // but with confusing semantics
+  ZERO_OR_ONE which?;
+};
+
+
+function utcToCivil(Utc utc) returns Civil;
+// error if civilTime.utcOffset is missing
+function utcFromCivil(Civil civilTime) returns Utc|Error;
+
+// The string format used by civilFromString and civilToString
+// is ISO 8601 but with more flexibility that RFC 3339 as follows:
+// missing utcOffset field represented by missing time zone offset
+// missing seconds in time represented by missing second
+// field in TimeOfDay
+
+function civilFromString(string str) returns Utc|Error;
+// Returns ISO8601 string
+function civilToString(Civil civilTime) returns string;
+function utcTimeOfDay(Utc utc) returns TimeOfDay;
+// XXX function to return Seconds since midnight
+function utcDate(Utc utc) returns Date;
+
+// Phase 2
+
+// Time zones
+
+type Zone readonly & object {
+  // if always at a fixed offset from Utc, then this
+  // function returns it; otherwise nil
+  function fixedOffset() returns ZoneOffset?;
+  // this does not pay attention to timeZoneOffset nor dayOfWeek
+  // it does pay attention to utc
+  function utcFromCivil(Civil civilTime) returns Utc|Error;
+  function utcToCivil(Utc utc) returns Civil;
+};
+
+final Zone systemZone = check loadSystemZone();
+
+// Get a time zone from Ballerina's internal database
+// of time zones.
+// id is  of form "Continent/City"
+function getZone(string id) returns Zone?;
+
+// Human-oriented time differences
+
+// This is not quite a nominal duration,
+// because durations are positive
+// Python uses the word Delta, which is good
+type Delta record {|
+  int years?;
+  int months?;
+  int weeks?;
+  int days?;
+  int hours?;
+  int minutes?;
+  Seconds seconds?;
 |};
-
-# Represents a chunk of time.
-#
-# + years - Number of years
-# + months - Number of months
-# + days - Number of days
-# + hours - Number of hours
-# + minutes - Number of minutes
-# + seconds - Number of seconds
-# + milliSeconds - Number of milliseconds
-public type Duration record {|
-    int years = 0;
-    int months = 0;
-    int days = 0;
-    int hours = 0;
-    int minutes = 0;
-    int seconds = 0;
-    int milliSeconds = 0;
-|};
-
-# Returns the ISO 8601 string representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  string|error timeString = time:toString(time);
-# ```
-#
-# + time - The Time record to be converted to string
-# + return - The ISO 8601-formatted string of the given time or else a `time:Error` if failed to convert
-public isolated function toString(Time time) returns string|Error = @java:Method {
-    name: "toTimeString",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the formatted string representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  string|error timeString = time:format(time, time:TIME_FORMAT_RFC_1123);
-# ```
-#
-# + time - The Time record to be formatted
-# + timeFormat - The format, which is used to format the time represented by this record
-# + return - The formatted string of the given time or else a `time:Error` if failed to format the time
-public isolated function format(Time time, DateTimeFormat|string timeFormat) returns string|Error = @java:Method {
-    name: "format",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the year representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error year = time:getYear(time);
-# ```
-#
-# + time - The Time record to retrieve the year representation
-# + return - The year representation or else a `time:Error` if failed to retrieve the year
-public isolated function getYear(Time time) returns int|Error = @java:Method {
-    name: "getYear",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the month representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error month = time:getMonth(time);
-# ```
-#
-# + time - The Time record to get the month representation from
-# + return - The month-of-year from 1 (January) to 12 (December) or else a `time:Error` if failed to retrieve the month
-public isolated function getMonth(Time time) returns int|Error = @java:Method {
-    name: "getMonth",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the date representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error day = time:getDay(time);
-# ```
-#
-# + time - The Time record to get the date representation
-# + return - The day-of-month from 1 to 31 or else a `time:Error` if failed to retrieve the day
-public isolated function getDay(Time time) returns int|Error = @java:Method {
-    name: "getDay",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the weekday representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  time:DayOfWeek|error weekDay = time:getWeekday(time);
-# ```
-#
-# + time - The Time record to get the weekday representation
-# + return - The weekday representation from SUNDAY to SATURDAY or else a `time:Error` if failed to retrieve the weekday
-public isolated function getWeekday(Time time) returns DayOfWeek|Error = @java:Method {
-    name: "getWeekday",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the hour representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error hour = time:getHour(time);
-# ```
-#
-# + time - The Time record to get the hour representation
-# + return - The hour-of-day from 0 to 23 or else a `time:Error` if failed to retrieve the hour
-public isolated function getHour(Time time) returns int|Error = @java:Method {
-    name: "getHour",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the minute representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error minute = time:getMinute(time);
-# ```
-#
-# + time - The Time record to get the minute representation
-# + return - The minute-of-hour to represent from 0 to 59 or else a `time:Error` if failed to retrieve the minute
-public isolated function getMinute(Time time) returns int|Error = @java:Method {
-    name: "getMinute",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the second representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error second = time:getSecond(time);
-# ```
-#
-# + time - The Time record to get the second representation
-# + return - The second-of-minute from 0 to 59 or else a `time:Error` if failed to retrieve the second
-public isolated function getSecond(Time time) returns int|Error = @java:Method {
-    name: "getSecond",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the millisecond representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  int|error milliSecond = time:getMilliSecond(time);
-# ```
-#
-# + time - The Time record to get the millisecond representation
-# + return - The milli-of-second from 0 to 999 or else a `time:Error` if failed to retrieve the millisecond
-public isolated function getMilliSecond(Time time) returns int|Error = @java:Method {
-    name: "getMilliSecond",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the date representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  [int, int, int]|error date = time:getDate(time);
-# ```
-#
-# + time - The Time record to get the date representation
-# + return - The year representation with
-#            the month-of-year from 1 (January) to 12 (December) and 
-#            the day-of-month from 1 to 31 or else a `time:Error` if failed to retrieve the date
-public isolated function getDate(Time time) returns [int, int, int]|Error = @java:Method {
-    name: "getDate",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the time representation of the given time.
-# ```ballerina
-#  time:TimeZone zoneValue = {id: "America/Panama"};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  [int, int, int, int]|error timeGenerated = time:getTime(time);
-# ```
-#
-# + time - The Time record
-# + return - The hour-of-day to represent from 0 to 23,
-#            the minute-of-hour to represent from 0 to 59,
-#            the second-of-minute from 0 to 59,
-#            and the milli-of-second from 0 to 999 or else a `time:Error` if failed to retrieve the time
-public isolated function getTime(Time time) returns [int, int, int, int]|Error = @java:Method {
-    name: "getTime",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Add specified durations to the given time value.
-# ```ballerina
-#  string timeText = "2020-06-26T09:46:22.444-0500";
-#  string timeFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
-#  time:Time|error originalTime = time:parse(timeText, timeFormat);
-#  Duration delta = {years: 1, months: 2};
-#  if (originalTime is time:Time) {
-#      time:Time|error newTime = time:addDuration(originalTime, delta);
-#  }
-# ```
-#
-# + time - The Time record to add the duration 
-# + duration - The duration to be added
-# + return - Time record containing time and zone information after the addition or else a `time:Error` if
-#            failed to add duration
-public isolated function addDuration(Time time, Duration duration) returns Time|Error = @java:Method {
-    name: "addDuration",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Subtract specified durations from the given time value.
-# ```ballerina
-#  string timeText = "2020-06-26T09:46:22.444-0500";
-#  string timeFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
-#  time:Time|error originalTime = time:parse(timeText, timeFormat);
-#  Duration delta = {years: 1, months: 2};
-#  if (originalTime is time:Time) {
-#      time:Time|error newTime = time:subtractDuration(originalTime, delta);
-#  }
-# ```
-#
-# + time - The Time record to subtract the duration from
-# + duration - The duration to be subtracted
-# + return - Time record containing time and zone information after the subtraction or else a `time:Error` if
-#            failed to subtract duration
-public isolated function subtractDuration(Time time, Duration duration) returns Time|Error = @java:Method {
-    name: "subtractDuration",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Change the time-zone of the given time.
-# ```ballerina
-#  string zoneId = "America/Panama";
-#  time:TimeZone zoneValue = {id: zoneId};
-#  time:Time time = {time: 1578488382444, zone: zoneValue};
-#  time:Time|time:Error newTime = time:toTimeZone(time, zoneId);
-# ```
-#
-# + time - The Time record of which the time-zone is to be changed
-# + zoneId - The new time-zone ID
-# + return - Time record containing the time and zone information after the conversion
-#            or else a `time:Error` if failed to format the time
-public isolated function toTimeZone(Time time, string zoneId) returns Time|Error = @java:Method {
-    name: "toTimeZone",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the current time value with the default system time-zone.
-# ```ballerina
-#  time:Time now = time:currentTime();
-# ```
-#
-# + return - Time record containing the time and the zone information
-public isolated function currentTime() returns Time = @java:Method {
-    name: "currentTime",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the current system time in nano seconds.
-# ```ballerina
-#  int now = time:nanoTime();
-# ```
-#
-# + return - Integer value of the current system time in nano seconds
-public isolated function nanoTime() returns int = @java:Method {
-    name: "nanoTime",
-    'class: "java.lang.System"
-} external;
-
-# Returns the Time record correspoding to the given time components and time-zone.
-# ```ballerina
-#  time:Time|time:Error dateTime = time:createTime(2020, 3, 28, 23, 42, 45, 554, "America/Panama");
-# ```
-#
-# + year - The year representation
-# + month - The month-of-year to represent from 1 (January) to 12 (December)
-# + date - The day-of-month to represent from 1 to 31
-# + hour - The hour-of-day to represent from 0 to 23
-# + minute - The minute-of-hour to represent from 0 to 59
-# + second - The second-of-minute to represent, from 0 to 59
-# + milliSecond - The milli-of-second to represent, from 0 to 999
-# + zoneId - The zone id of the required time-zone.If empty the system local time-zone will be used
-# + return - Time record containing time and zone information or an `time:Error` if failed to create the time
-public isolated function createTime(int year, int month, int date, int hour = 0, int minute = 0,
-                        int second = 0, int milliSecond = 0, string zoneId = "") returns Time|Error = @java:Method {
-    name: "createTime",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Returns the time for the given string representation based on the given format string.
-# ```ballerina
-#  string timeFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSZ";
-#  time:Time|time:Error time = time:parse("2020-06-26T09:46:22.444-0500", timeFormat);
-# ```
-#
-# + data - The time text to parse
-# + timeFormat - The format, which is used to parse the given text
-# + return - Time record containing the time and zone information or else  a `time:Error` if failed to parse the given string
-public isolated function parse(string data, DateTimeFormat|string timeFormat) returns Time|Error = @java:Method {
-    name: "parse",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-
-# Calculate the difference between two Time values.
-# ```ballerina
-# Duration|error delta = time:getDifference(timeone, timetwo);
-# ```
-#
-# + timeone - Start time
-# + timetwo - End time
-# + return - The Duration of the difference
-public isolated function getDifference(Time timeone, Time timetwo) returns Duration|Error = @java:Method {
-    name: "getDifference",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
-
-# Get available timezone IDs.
-#
-# + offset - Timezone offset in milliseconds
-# + return - All the available timezone IDs or the IDs that fall under an offset, if the offset value is specified
-public isolated function getTimezones(int? offset = ()) returns string[] = @java:Method {
-    name: "getTimezones",
-    'class: "org.ballerinalang.stdlib.time.nativeimpl.ExternMethods"
-} external;
